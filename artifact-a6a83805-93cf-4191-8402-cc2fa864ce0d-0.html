@@ -1,0 +1,468 @@
+
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="UTF-8">
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+							<style>
+								body {
+									background-color: white; /* Ensure the iframe has a white background */
+								}
+
+								
+							</style>
+                        </head>
+                        <body>
+                            <!-- Vibe-coded with Gambit v1.2 (https://bayleaf.chat/?model=gambit) -->
+<!-- DESIGN QUESTIONS:
+     1. Does hex movement + hunger pressure create meaningful tactical tension?
+     2. How does managing 3 students with individual hunger feel?
+     3. Does the 12-turn limit feel urgent or rushed?
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Himeyuri: Escape South</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #1a1a2e;
+  color: #eee;
+  font-family: 'Segoe UI', sans-serif;
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+#game-area {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+#sidebar {
+  width: 220px;
+  background: #16213e;
+  padding: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+h1 { font-size: 1.1em; color: #e94560; }
+.student-card {
+  background: #0f3460;
+  padding: 10px;
+  border-radius: 6px;
+}
+.student-card.dead { opacity: 0.4; }
+.student-card h3 { font-size: 0.9em; margin-bottom: 5px; }
+.hunger-bar {
+  height: 8px;
+  background: #333;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.hunger-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #e94560, #f9a825);
+  transition: width 0.3s;
+}
+#turn-info {
+  text-align: center;
+  padding: 10px;
+  background: #0f3460;
+  border-radius: 6px;
+}
+#end-turn-btn {
+  padding: 12px;
+  background: #e94560;
+  border: none;
+  color: white;
+  font-weight: bold;
+  border-radius: 6px;
+  cursor: pointer;
+}
+#end-turn-btn:hover { background: #ff6b6b; }
+#message {
+  margin-top: auto;
+  padding: 10px;
+  background: #0f3460;
+  border-radius: 6px;
+  font-size: 0.85em;
+  min-height: 60px;
+}
+svg { filter: drop-shadow(0 0 10px rgba(0,0,0,0.5)); }
+.hex {
+  fill: #2d4a3e;
+  stroke: #1a1a2e;
+  stroke-width: 2;
+  cursor: pointer;
+  transition: fill 0.2s;
+}
+.hex:hover { fill: #3d6a4e; }
+.hex.exit { fill: #1a4a3a; stroke: #4ecca3; stroke-width: 3; }
+.hex.highlight { fill: #4ecca3; }
+.hex.blocked { fill: #4a2d2d; }
+.student {
+  pointer-events: none;
+  transition: transform 0.3s;
+}
+.enemy {
+  pointer-events: none;
+}
+.food { pointer-events: none; }
+.selected-ring {
+  fill: none;
+  stroke: #f9a825;
+  stroke-width: 3;
+  pointer-events: none;
+}
+#overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.85);
+  display: none;
+  justify-content: center;
+  align-items: center;
+  flex-direction: column;
+  gap: 20px;
+}
+#overlay h2 { color: #e94560; font-size: 2em; }
+#overlay button {
+  padding: 15px 30px;
+  font-size: 1.1em;
+  background: #4ecca3;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+</style>
+</head>
+<body>
+
+<div id="game-area">
+  <svg id="board" width="500" height="460"></svg>
+</div>
+
+<div id="sidebar">
+  <h1>HIMEYURI ESCAPE</h1>
+  <div id="turn-info">Turn <span id="turn-num">1</span> / 12</div>
+  <div id="students"></div>
+  <button id="end-turn-btn">END TURN</button>
+  <div id="message">Select a student, then click an adjacent hex to move.</div>
+</div>
+
+<div id="overlay">
+  <h2 id="end-title">GAME OVER</h2>
+  <p id="end-msg"></p>
+  <button onclick="location.reload()">PLAY AGAIN</button>
+</div>
+
+<script>
+// === DESIGN CONSTANTS (edit these!) ===
+const GRID_COLS = 7;
+const GRID_ROWS = 7;
+const HEX_SIZE = 32;
+const MAX_TURNS = 12;
+const HUNGER_DECAY = 12;      // % lost per turn
+const FOOD_RESTORE = 35;      // % restored per food
+const STARTING_HUNGER = 100;
+const NUM_FOOD = 5;
+const STUDENT_NAMES = ["Yoshiko", "Miyagi", "Ruriko"];
+const STUDENT_START = [[1,1], [2,0], [1,2]]; // axial coords
+const ENEMY_PATHS = [
+  [[3,2],[4,2],[5,1],[4,1],[3,2]], // patrol loop 1
+  [[4,4],[3,5],[2,5],[3,4],[4,4]]  // patrol loop 2
+];
+
+// === HEX MATH (pointy-top axial coordinates) ===
+const sqrt3 = Math.sqrt(3);
+function axialToPixel(q, r) {
+  const x = HEX_SIZE * (sqrt3 * q + sqrt3/2 * r);
+  const y = HEX_SIZE * (3/2 * r);
+  return [x + 140, y + 60];
+}
+function hexCorners(cx, cy) {
+  let pts = [];
+  for (let i = 0; i < 6; i++) {
+    const angle = Math.PI / 180 * (60 * i - 30);
+    pts.push([cx + HEX_SIZE * Math.cos(angle), cy + HEX_SIZE * Math.sin(angle)]);
+  }
+  return pts.map(p => p.join(",")).join(" ");
+}
+function axialDistance(a, b) {
+  return (Math.abs(a[0]-b[0]) + Math.abs(a[0]+a[1]-b[0]-b[1]) + Math.abs(a[1]-b[1])) / 2;
+}
+function axialNeighbors(q, r) {
+  return [[q+1,r],[q-1,r],[q,r+1],[q,r-1],[q+1,r-1],[q-1,r+1]];
+}
+function coordKey(q, r) { return `${q},${r}`; }
+
+// === GAME STATE ===
+let hexes = {};
+let students = [];
+let enemies = [];
+let foodItems = [];
+let turn = 1;
+let selectedStudent = null;
+let movedThisTurn = new Set();
+let gameOver = false;
+
+const svg = document.getElementById("board");
+const studentsDiv = document.getElementById("students");
+const messageDiv = document.getElementById("message");
+const turnSpan = document.getElementById("turn-num");
+
+// === INITIALIZATION ===
+function init() {
+  // Create hex grid
+  for (let r = 0; r < GRID_ROWS; r++) {
+    for (let q = 0; q < GRID_COLS; q++) {
+      // offset odd rows
+      const aq = q - Math.floor(r/2);
+      const [px, py] = axialToPixel(aq, r);
+      const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+      poly.setAttribute("points", hexCorners(px, py));
+      poly.setAttribute("class", "hex" + (r === GRID_ROWS-1 ? " exit" : ""));
+      poly.dataset.q = aq;
+      poly.dataset.r = r;
+      poly.addEventListener("click", onHexClick);
+      svg.appendChild(poly);
+      hexes[coordKey(aq, r)] = { el: poly, q: aq, r, px, py };
+    }
+  }
+
+  // Create students
+  STUDENT_NAMES.forEach((name, i) => {
+    const [q, r] = STUDENT_START[i];
+    const hex = hexes[coordKey(q, r)];
+    const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    g.setAttribute("class", "student");
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("r", 14);
+    circle.setAttribute("fill", ["#ff6b6b","#4ecdc4","#ffe66d"][i]);
+    circle.setAttribute("stroke", "#fff");
+    circle.setAttribute("stroke-width", 2);
+    g.appendChild(circle);
+    svg.appendChild(g);
+    students.push({ name, q, r, hunger: STARTING_HUNGER, alive: true, el: g, color: circle.getAttribute("fill") });
+    updateStudentPosition(students[i]);
+  });
+
+  // Create enemies
+  ENEMY_PATHS.forEach((path, i) => {
+    const [q, r] = path[0];
+    const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    g.setAttribute("class", "enemy");
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("width", 22);
+    rect.setAttribute("height", 22);
+    rect.setAttribute("x", -11);
+    rect.setAttribute("y", -11);
+    rect.setAttribute("fill", "#e94560");
+    rect.setAttribute("rx", 3);
+    g.appendChild(rect);
+    svg.appendChild(g);
+    enemies.push({ path, pathIndex: 0, q, r, el: g });
+    updateEnemyPosition(enemies[i]);
+  });
+
+  // Spawn food on random hexes (avoid start positions and enemies)
+  const occupied = new Set([...STUDENT_START.map(p => coordKey(...p)), ...ENEMY_PATHS.flat().map(p => coordKey(...p))]);
+  const candidates = Object.keys(hexes).filter(k => !occupied.has(k) && hexes[k].r < GRID_ROWS - 1);
+  shuffle(candidates);
+  for (let i = 0; i < NUM_FOOD && i < candidates.length; i++) {
+    const h = hexes[candidates[i]];
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", h.px);
+    circle.setAttribute("cy", h.py);
+    circle.setAttribute("r", 8);
+    circle.setAttribute("fill", "#fff");
+    circle.setAttribute("class", "food");
+    svg.insertBefore(circle, svg.querySelector(".student"));
+    foodItems.push({ q: h.q, r: h.r, el: circle, collected: false });
+  }
+
+  renderSidebar();
+}
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
+
+function updateStudentPosition(s) {
+  const h = hexes[coordKey(s.q, s.r)];
+  if (h) s.el.setAttribute("transform", `translate(${h.px},${h.py})`);
+}
+function updateEnemyPosition(e) {
+  const h = hexes[coordKey(e.q, e.r)];
+  if (h) e.el.setAttribute("transform", `translate(${h.px},${h.py})`);
+}
+
+function renderSidebar() {
+  studentsDiv.innerHTML = students.map((s, i) => `
+    <div class="student-card${s.alive ? "" : " dead"}">
+      <h3 style="color:${s.color}">${s.name} ${s.alive ? (movedThisTurn.has(i) ? "✓" : "") : "✗"}</h3>
+      <div class="hunger-bar"><div class="hunger-fill" style="width:${Math.max(0,s.hunger)}%"></div></div>
+    </div>
+  `).join("");
+  turnSpan.textContent = turn;
+}
+
+// === INTERACTION ===
+function onHexClick(e) {
+  if (gameOver) return;
+  const q = parseInt(e.target.dataset.q);
+  const r = parseInt(e.target.dataset.r);
+
+  // Check if clicking on a student
+  const clickedStudent = students.findIndex(s => s.alive && s.q === q && s.r === r);
+  if (clickedStudent >= 0 && !movedThisTurn.has(clickedStudent)) {
+    selectStudent(clickedStudent);
+    return;
+  }
+
+  // If we have a selection, try to move
+  if (selectedStudent !== null) {
+    const s = students[selectedStudent];
+    const neighbors = axialNeighbors(s.q, s.r);
+    if (neighbors.some(n => n[0] === q && n[1] === r) && hexes[coordKey(q, r)]) {
+      moveStudent(selectedStudent, q, r);
+    }
+  }
+}
+
+function selectStudent(i) {
+  clearHighlights();
+  selectedStudent = i;
+  const s = students[i];
+  
+  // Draw selection ring
+  const h = hexes[coordKey(s.q, s.r)];
+  const ring = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  ring.setAttribute("cx", h.px);
+  ring.setAttribute("cy", h.py);
+  ring.setAttribute("r", 20);
+  ring.setAttribute("class", "selected-ring");
+  svg.appendChild(ring);
+
+  // Highlight valid moves
+  axialNeighbors(s.q, s.r).forEach(([nq, nr]) => {
+    const key = coordKey(nq, nr);
+    if (hexes[key]) hexes[key].el.classList.add("highlight");
+  });
+
+  messageDiv.textContent = `${s.name} selected. Click adjacent hex to move.`;
+}
+
+function clearHighlights() {
+  document.querySelectorAll(".selected-ring").forEach(el => el.remove());
+  document.querySelectorAll(".hex.highlight").forEach(el => el.classList.remove("highlight"));
+}
+
+function moveStudent(i, q, r) {
+  const s = students[i];
+  s.q = q;
+  s.r = r;
+  updateStudentPosition(s);
+  movedThisTurn.add(i);
+  clearHighlights();
+  selectedStudent = null;
+
+  // Check food collection
+  const food = foodItems.find(f => !f.collected && f.q === q && f.r === r);
+  if (food) {
+    food.collected = true;
+    food.el.remove();
+    s.hunger = Math.min(100, s.hunger + FOOD_RESTORE);
+    messageDiv.textContent = `${s.name} found rice! (+${FOOD_RESTORE}% hunger)`;
+  } else {
+    messageDiv.textContent = `${s.name} moved.`;
+  }
+
+  // Check enemy collision
+  if (enemies.some(e => e.q === q && e.r === r)) {
+    s.alive = false;
+    s.el.style.opacity = 0.3;
+    messageDiv.textContent = `${s.name} was captured!`;
+  }
+
+  renderSidebar();
+  checkWinLose();
+}
+
+// === TURN MANAGEMENT ===
+document.getElementById("end-turn-btn").addEventListener("click", endTurn);
+
+function endTurn() {
+  if (gameOver) return;
+
+  // Apply hunger decay and check starvation
+  students.forEach(s => {
+    if (!s.alive) return;
+    s.hunger -= HUNGER_DECAY;
+    if (s.hunger <= 0) {
+      s.alive = false;
+      s.el.style.opacity = 0.3;
+      messageDiv.textContent = `${s.name} collapsed from hunger!`;
+    }
+  });
+
+  // Move enemies along patrol paths
+  enemies.forEach(e => {
+    e.pathIndex = (e.pathIndex + 1) % e.path.length;
+    [e.q, e.r] = e.path[e.pathIndex];
+    updateEnemyPosition(e);
+    // Check if enemy moved onto a student
+    students.forEach(s => {
+      if (s.alive && s.q === e.q && s.r === e.r) {
+        s.alive = false;
+        s.el.style.opacity = 0.3;
+        messageDiv.textContent = `${s.name} was captured by patrol!`;
+      }
+    });
+  });
+
+  turn++;
+  movedThisTurn.clear();
+  clearHighlights();
+  selectedStudent = null;
+  renderSidebar();
+  checkWinLose();
+}
+
+function checkWinLose() {
+  const alive = students.filter(s => s.alive);
+  const escaped = alive.filter(s => hexes[coordKey(s.q, s.r)]?.el.classList.contains("exit"));
+
+  if (escaped.length === alive.length && alive.length > 0) {
+    endGame(true, `${escaped.length} student${escaped.length > 1 ? "s" : ""} escaped to safety!`);
+  } else if (alive.length === 0) {
+    endGame(false, "All students lost.");
+  } else if (turn > MAX_TURNS) {
+    endGame(false, `Time ran out. ${alive.length - escaped.length} still trapped.`);
+  }
+}
+
+function endGame(won, msg) {
+  gameOver = true;
+  document.getElementById("end-title").textContent = won ? "ESCAPED" : "GAME OVER";
+  document.getElementById("end-title").style.color = won ? "#4ecca3" : "#e94560";
+  document.getElementById("end-msg").textContent = msg;
+  document.getElementById("overlay").style.display = "flex";
+}
+
+init();
+</script>
+</body>
+</html>
+
+							<script>
+                            	
+							</script>
+                        </body>
+                        </html>
+                    
